@@ -2816,6 +2816,12 @@
   pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/1453
 
 - config-keys:
+    - gptoss-fp4-h200-trt
+  description:
+    - "Update TensorRT-LLM image from v1.3.0rc11 (34d old) to v1.3.0rc14 (latest pre-release)"
+  pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/1491
+
+- config-keys:
     - qwen3.5-fp4-b300-sglang
     - qwen3.5-fp4-b300-sglang-mtp
   description:
