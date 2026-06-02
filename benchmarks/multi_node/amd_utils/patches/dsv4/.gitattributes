@@ -1,0 +1,3 @@
+# These overlays are bind-mounted into a Linux container; keep LF on all
+# platforms so a Windows checkout + sync to the cluster cannot leak CRLF.
+*.py text eol=lf
