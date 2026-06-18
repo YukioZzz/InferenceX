@@ -178,6 +178,20 @@ if [[ "${DECODE_ENABLE_DP:-false}" == "true" ]] && ! echo "$DECODE_SERVER_CONFIG
     DECODE_SERVER_CONFIG+=" --enable-dp-attention"
 fi
 
+# Inject --max-num-seqs so the engine can batch up to the benchmark concurrency
+# instead of vLLM's default seq cap (which serializes prefill at high CONC).
+# BENCH_MAX_CONCURRENCY is an x-delimited list (e.g. "8x16x32"); use its max.
+# Override with MAX_NUM_SEQS to decouple engine batch size from client concurrency.
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-$(echo "${BENCH_MAX_CONCURRENCY}" | tr 'x' '\n' | sort -n | tail -1)}"
+if [[ -n "${MAX_NUM_SEQS}" && "${MAX_NUM_SEQS}" =~ ^[0-9]+$ ]]; then
+    if ! echo "$PREFILL_SERVER_CONFIG" | grep -q -- '--max-num-seqs'; then
+        PREFILL_SERVER_CONFIG+=" --max-num-seqs ${MAX_NUM_SEQS}"
+    fi
+    if ! echo "$DECODE_SERVER_CONFIG" | grep -q -- '--max-num-seqs'; then
+        DECODE_SERVER_CONFIG+=" --max-num-seqs ${MAX_NUM_SEQS}"
+    fi
+fi
+
 echo "PREFILL_SERVER_CONFIG (after TP/EP/DP): $PREFILL_SERVER_CONFIG"
 echo "DECODE_SERVER_CONFIG (after TP/EP/DP): $DECODE_SERVER_CONFIG"
 
