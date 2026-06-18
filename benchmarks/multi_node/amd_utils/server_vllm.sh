@@ -192,6 +192,15 @@ if [[ -n "${MAX_NUM_SEQS}" && "${MAX_NUM_SEQS}" =~ ^[0-9]+$ ]]; then
     fi
 fi
 
+# Optional cudagraph A/B: override the model YAML's cudagraph_mode (default
+# PIECEWISE for the KV-connector path) without editing the YAML. e.g.
+# DISAGG_CUDAGRAPH_MODE=FULL_AND_PIECEWISE to test full-graph decode capture.
+if [[ -n "${DISAGG_CUDAGRAPH_MODE:-}" ]]; then
+    PREFILL_SERVER_CONFIG=$(echo "$PREFILL_SERVER_CONFIG" | sed -E "s/\"cudagraph_mode\":\"[A-Z_]+\"/\"cudagraph_mode\":\"${DISAGG_CUDAGRAPH_MODE}\"/g")
+    DECODE_SERVER_CONFIG=$(echo "$DECODE_SERVER_CONFIG" | sed -E "s/\"cudagraph_mode\":\"[A-Z_]+\"/\"cudagraph_mode\":\"${DISAGG_CUDAGRAPH_MODE}\"/g")
+    echo "[CUDAGRAPH] Overrode cudagraph_mode -> ${DISAGG_CUDAGRAPH_MODE}"
+fi
+
 echo "PREFILL_SERVER_CONFIG (after TP/EP/DP): $PREFILL_SERVER_CONFIG"
 echo "DECODE_SERVER_CONFIG (after TP/EP/DP): $DECODE_SERVER_CONFIG"
 
