@@ -32,8 +32,11 @@ because the default pip wheels pull CUDA libraries.
 
 ```
 launch_pd.sh              # primary launcher: <proxy|prefill|decode>  (Mooncake + LMCache MultiConnector)
+                          #   env: CONC (=> --max-num-seqs), EP=1 (=> --enable-expert-parallel, EP size = TP = 8)
 bench_agentic.sh          # aiperf agentic trace-replay runner:  bench_agentic.sh <CONC> <DURATION_s>
-toy_proxy_server.py       # PD proxy (prefill->decode routing); patched to stream text/event-stream (SSE)
+eval_gsm8k.sh             # GSM8K correctness check through the proxy:  eval_gsm8k.sh <chat|comp> [LIMIT]
+toy_proxy_server.py       # PD proxy (prefill->decode routing); honors the OpenAI `stream` flag
+                          #   (JSON when stream=false for lm-eval, SSE when stream=true for aiperf)
 connectors/               # alternative KV-transfer backends evaluated (reference only)
   mooncake_only.sh        #   MooncakeConnector without LMCache
   nixl.sh                 #   NixlConnector (UCX)         — degenerate output on VF
@@ -48,8 +51,8 @@ tools/
   probe_vllm.sh           # check image vLLM version + kv_offload / connector module availability
 ```
 
-Node IPs are hard-coded in `launch_pd.sh` (`P_IP=192.168.0.6`, `D_IP=192.168.0.7`);
-prefill+proxy run on DO-6, decode on DO-7.
+Node IPs are hard-coded in `launch_pd.sh` (`P_IP`/`D_IP`, the `192.168.0.x` fabric);
+prefill+proxy run on the P node, decode on the D node.
 
 ## How to run
 
@@ -57,16 +60,18 @@ prefill+proxy run on DO-6, decode on DO-7.
 # 1. on each node, build the ROCm image once (LMCache + Mooncake from source)
 bash build/build_lmcache_rocm.sh ; bash build/build_mooncake_rocm.sh
 
-# 2. start engines (CONC sets vLLM --max-num-seqs)
-CONC=32 bash launch_pd.sh prefill     # DO-6
-CONC=32 bash launch_pd.sh decode      # DO-7
-bash launch_pd.sh proxy               # DO-6
+# 2. start engines (CONC sets vLLM --max-num-seqs; EP=1 adds --enable-expert-parallel)
+CONC=128 bash launch_pd.sh prefill     # P node
+CONC=128 bash launch_pd.sh decode      # D node
+bash launch_pd.sh proxy                # P node
 
-# 3. run the agentic trace replay (CONC, duration seconds)
-bash bench_agentic.sh 32 900
-
-# 4. read results + cache hit rates
+# 3a. run the agentic trace replay (CONC, duration seconds; >=900 is a canonical point)
+bash bench_agentic.sh 32 1800
 bash tools/read_result.sh 32
+
+# 3b. or run a GSM8K correctness check through the PD path (both endpoints)
+bash eval_gsm8k.sh chat 50     # /v1/chat/completions (apply_chat_template) — the correct path for this model
+bash eval_gsm8k.sh comp 50     # /v1/completions (plain)
 ```
 
 ## Engine config — aligned to the single-node recipe
@@ -92,27 +97,52 @@ The image ships **vLLM 0.20.2** (newer than the SN recipe's 0.18), which already
 the upstream `v1/kv_offload` subsystem (demand-pinned host allocator, chunked GPU↔CPU KV
 loading) and MLA `block_size=1` support that the recipe's flag combo relies on.
 
-## Results (aligned engine, valid 900 s runs)
+## Throughput — concurrency sweep (aligned engine, 30-min/1800 s points, no-EP)
 
-| Metric | conc32 | conc64 |
+| conc | req tput | out tok/s | in tok/s | TTFT p50 | per-user out (p50) | reqs | theo hit |
+|---|---|---|---|---|---|---|---|
+| 8   | 0.24 rps | 188 | 22.5k | 2.1 s | 58.0 | 427 | 95.7 % |
+| 16  | 0.42 rps | 349 | 39.1k | 1.9 s | 42.9 | 765 | 95.8 % |
+| **32** | **0.49 rps** | **442 (peak)** | 44.2k | 2.7 s | 22.8 | 894 | 94.3 % |
+| 64  | 0.49 rps | 374 | 42.1k | 14.6 s | 9.0 | 894 | 94.7 % |
+| 128 | 0.38 rps | 384 | 38.2k | 200.9 s | 9.9 | 702 | 95.3 % |
+
+**Saturation knee = conc32** (442 tok/s peak). Beyond it aggregate throughput plateaus
+(374–384) while TTFT p50 explodes (2.7 s → 14.6 s → 201 s at conc128 = request-queue
+collapse). Usable operating range is conc 16–32. Removing `--enforce-eager` + `fp8` KV +
+`--max-num-seqs` gave ~4.6× output / ~2.7× TTFT vs the unaligned config. Higher concurrency
+needs more prefill capacity (2P1D), not more load.
+
+### Expert parallelism (EP) at high concurrency — net negative here
+
+`EP=1` (`--enable-expert-parallel`, EP size = TP = 8) on **both** prefill and decode, vs no-EP:
+
+| conc | out tok/s no-EP → EP | req tput no-EP → EP |
 |---|---|---|
-| Request throughput | **0.52 rps** | 0.48 rps |
-| Output token throughput | **443 tok/s** | 375 tok/s |
-| Input token throughput | 49,215 tok/s | 41,676 tok/s |
-| TTFT (avg) | **5.0 s** | 17.8 s |
-| Request latency (avg) | **43.4 s** | 104.0 s |
-| Per-user output | **24.3 tok/s** | 10.4 tok/s |
-| Requests / errors | 481 / 0 | 447 / 0 |
-| GPU radix prefix hit | 89.5 % | 71.7 % |
-| LMCache L2 lookup hit | 77.9 % | 78.1 % |
-| Theoretical hit ceiling | 95.0 % | 94.9 % |
+| 64  | 374 → **341** (-9 %) | 0.49 → 0.44 |
+| 128 | 384 → **357** (-7 %) | 0.38 → 0.36 |
 
-**Takeaways**
-- Removing `--enforce-eager` + adding `--kv-cache-dtype fp8` + `--max-num-seqs $CONC`
-  gave ~4.6× output throughput and ~2.7× faster TTFT at conc32 vs the unaligned config.
-- The 1P1D topology is **throughput-saturated at conc32**; conc64 does not raise aggregate
-  throughput (slightly lower) and only inflates latency — i.e. conc64 is past the
-  saturation knee. Higher concurrency needs more prefill capacity (2P1D), not more load.
-- Mooncake carries cross-node PD KV transfer with **0 errors**; LMCache L2 contributes a
-  stable ~78 % lookup-token hit and absorbs more traffic as GPU-radix evicts under
-  contention (read chunks 150 k→296 k from conc32→conc64).
+EP **slightly hurts** at conc64/128: the 1P1D is already prefill-compute-saturated at
+conc32, so the per-step MoE token batch never gets large enough for EP's all-to-all
+dispatch to beat TP's all-reduce — the extra dispatch overhead is pure loss. EP only pays
+off with a much larger per-step batch (non-saturated prefill, i.e. 2P1D+ and higher batch).
+
+## Correctness — GSM8K through the PD path (5-shot, 50 samples)
+
+| endpoint | exact_match (flexible / strict) | verdict |
+|---|---|---|
+| `/v1/chat/completions` (apply_chat_template) | **0.98 / 0.98** | ✅ correct — matches the ~90 %+ expected for Kimi-K2.5-MXFP4 |
+| `/v1/completions` (plain) | 0.02 / 0.00 | benign artifact, **not** a serving bug — see note |
+
+The chat path scoring **98 %** confirms the Mooncake cross-node KV transfer + LMCache PD
+produces **correct tokens** (unlike the MoRIIO+LMCache path elsewhere, which scored ~30 %
+on chat from a connector KV-block bug — that bug does **not** reproduce here). The plain
+`/v1/completions` near-zero is a stop-token/extraction artifact: Kimi is a reasoning model
+and without a chat template it emits the correct answer (`#### 18`, `#### 3`, …) but then
+keeps generating hallucinated follow-up Q&A (no matching stop token), so GSM8K's strict
+extractor grabs the wrong number. The generated tokens are coherent and correct — chat is
+the intended eval path for this model.
+
+**Cache behavior**: Mooncake carries cross-node PD KV transfer with **0 errors**; LMCache
+L2 holds a stable ~78 % lookup-token hit and absorbs more traffic as the GPU radix cache
+evicts under contention (L2 read chunks 150 k→296 k from conc32→conc64).

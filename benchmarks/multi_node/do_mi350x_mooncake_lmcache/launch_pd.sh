@@ -7,9 +7,12 @@ IMG="kimi-lmc-mc-rocm:latest"
 RUNDIR=/root/run_logs
 mkdir -p "$RUNDIR"
 SERVER_PORT=2584
-P_IP="192.168.0.6"; D_IP="192.168.0.7"; PROXY_PORT=10001
+P_IP="192.168.0.6"; D_IP="192.168.0.5"; PROXY_PORT=10001
 # Engine max batch = benchmark concurrency (aligns with SN recipe --max-num-seqs $CONC).
 CONC="${CONC:-32}"
+# EP=1 enables MoE expert parallelism (--enable-expert-parallel) across the TP group.
+EP="${EP:-0}"
+EP_ARG=""; [ "$EP" = "1" ] && EP_ARG="--enable-expert-parallel"
 # LMCache L1 host-DRAM pool. DO MI350X VF nodes have ~2 TB host DRAM (not the
 # MI355X bare-metal ~2.7 TB), so we size to 1200 GB instead of the SN recipe's
 # 3000 GB to keep ~700 GB headroom for vLLM worker RSS + page cache.
@@ -79,7 +82,7 @@ done
 
 exec vllm serve /models/Kimi-K2.5-MXFP4 \\
   --host 0.0.0.0 --port ${SERVER_PORT} \\
-  --tensor-parallel-size 8 --trust-remote-code \\
+  --tensor-parallel-size 8 --trust-remote-code ${EP_ARG} \\
   --max-model-len 262144 --gpu-memory-utilization 0.90 --block-size 1 --mm-encoder-tp-mode data \\
   --kv-cache-dtype fp8 --max-num-seqs ${CONC} \\
   --enable-prefix-caching --disable-hybrid-kv-cache-manager \\

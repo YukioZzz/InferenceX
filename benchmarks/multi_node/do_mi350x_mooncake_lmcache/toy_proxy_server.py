@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -241,14 +241,37 @@ async def _handle_completions(api: str, request: Request):
 
         logger.debug("Using %s %s", prefill_client_info, decode_client_info)
 
-        # Stream response from decode service
-        async def generate_stream():
-            async for chunk in stream_service_response(
-                decode_client_info, api, req_data, request_id=request_id
-            ):
-                yield chunk
+        # Honor the client's stream flag (match native vLLM OpenAI server /
+        # the SA single-node recipe behavior): SSE only when stream=true,
+        # otherwise return the decode service's JSON verbatim. lm-eval
+        # (gsm8k) sends stream=false and expects application/json; aiperf
+        # sends --streaming and expects text/event-stream.
+        is_stream = bool(req_data.get("stream", False))
+        if is_stream:
+            async def generate_stream():
+                async for chunk in stream_service_response(
+                    decode_client_info, api, req_data, request_id=request_id
+                ):
+                    yield chunk
 
-        return StreamingResponse(generate_stream(), media_type="text/event-stream")
+            return StreamingResponse(generate_stream(), media_type="text/event-stream")
+
+        # Non-streaming: forward to decode and return its body/content-type as-is.
+        dec_headers = {
+            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+            "X-Request-Id": request_id,
+        }
+        dec_resp = await decode_client_info["client"].post(
+            api, json=req_data, headers=dec_headers
+        )
+        dec_resp.raise_for_status()
+        dec_body = await dec_resp.aread()
+        await dec_resp.aclose()
+        return Response(
+            content=dec_body,
+            status_code=dec_resp.status_code,
+            media_type=dec_resp.headers.get("content-type", "application/json"),
+        )
 
     except Exception as e:
         import sys
