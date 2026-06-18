@@ -1519,7 +1519,11 @@ dsr1-fp8-mi355x-sglang-disagg-mtp:
           - "DECODE_MTP_SIZE=2"
 
 kimik2.5-fp4-mi355x-vllm-disagg:
-  image: vllm/vllm-openai-rocm:nightly-bf610c2f56764e1b30bc6065f4ceace3d6e59036
+  # The nightly-bf610c2f build was never published under the vllm/ org (pull
+  # fails with "manifest unknown"). The identical build (same commit SHA) is
+  # available in SA's aigmkt registry, which is also the base image for the
+  # do_mi350x_mooncake_lmcache connector/build scripts.
+  image: aigmkt/vllm-openai-rocm:nightly-bf610c2f56764e1b30bc6065f4ceace3d6e59036
   model: amd/Kimi-K2.5-MXFP4
   model-prefix: kimik2.5
   runner: mi355x-disagg
