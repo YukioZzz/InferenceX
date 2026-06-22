@@ -1366,6 +1366,68 @@ kimik2.5-fp4-mi355x-vllm-disagg:
           additional-settings:
           - "DECODE_NODES=2"
 
+# Cross-node 1P1D agentic recipe: a single LMCacheConnectorV1 with all three KV
+# reuse tiers (L1 vLLM APC + L2 LMCache local_cpu host DRAM + L3 mooncakestore
+# over TCP) instead of MoRIIO. Shares the kimik2.5_fp4_mi355x_vllm-disagg.sh
+# launcher (resolved from model-prefix+precision+framework); the agentic-coding
+# scenario + KV_CONNECTOR=lmcache-mooncake additional-settings select the path.
+# Mooncake-TCP is used because the MI355X ionic NIC caps host RDMA MR
+# registration (<=64MiB/MR, ~3.8GiB/node); TCP has no NIC reg limit so the L3
+# pool can be large. Requires an image with lmcache + mooncake + mooncake_master
+# and the hipseg-patched mooncake .so (mounted via EXTRA_DOCKER_MOUNTS, or baked).
+kimik2.5-fp4-mi355x-vllm-disagg-agentic:
+  # Self-contained image: vLLM ROCm + lmcache + mooncake (USE_HIP_DMABUF) +
+  # mooncake_master + the hipseg-patched mooncake .so, all baked in. Public.
+  image: yukiozzz/kimi-lmc-mc-rocm:dmabuf
+  model: amd/Kimi-K2.5-MXFP4
+  model-prefix: kimik2.5
+  runner: mi355x-disagg
+  precision: fp4
+  framework: vllm-disagg
+  multinode: true
+  disagg: true
+  scenarios:
+    agentic-coding:
+    - duration: 1800
+      search-space:
+      # 1P1D: 1 prefill node (co-located with mooncake master + mc_pd_proxy) +
+      # 1 decode node = 2 nodes total. conc kept small (agentic is expensive).
+      - spec-decoding: "none"
+        conc-list: [ 8, 16, 32 ]
+        prefill:
+          num-worker: 1
+          tp: 8
+          ep: 1
+          dp-attn: false
+          additional-settings:
+          - "PREFILL_NODES=1"
+          # --- KV reuse path: LMCacheConnectorV1 + Mooncake-TCP store ---
+          - "KV_CONNECTOR=lmcache-mooncake"
+          - "ROUTER_TYPE=mc-proxy"
+          - "ENABLE_PREFIX_CACHING=1"
+          - "MAX_MODEL_LEN=262144"
+          # L2 host-CPU cache (per SA single-node agent recipe ~1200GB/node = 150GB/worker x TP8)
+          - "LMCACHE_LOCAL_CPU=True"
+          - "LMCACHE_MAX_LOCAL_CPU_GB=150"
+          # L3 Mooncake-TCP store (256GiB/engine; host-DRAM bound, node ~3TB)
+          - "MC_PROTOCOL=tcp"
+          - "MC_GLOBAL_SEG=274877906944"
+          - "MC_LOCAL_BUFFER=4294967296"
+          - "MC_MAX_MR_SIZE=137438953472"
+          - "MC_MASTER_PORT=50051"
+          - "MC_METADATA_PORT=8080"
+          # lmcache + mooncake + patched .so are baked into the image above, so
+          # no host-path mounts are needed (the recipe is cluster-portable).
+          # The L3 store uses TCP (no RDMA provider needed); decode EP all2all
+          # (mori) uses the same RDMA path as the sibling vllm-disagg recipe.
+        decode:
+          num-worker: 1
+          tp: 8
+          ep: 8
+          dp-attn: false
+          additional-settings:
+          - "DECODE_NODES=1"
+
 dsr1-fp4-mi355x-sglang-disagg:
   image: lmsysorg/sglang-rocm:v0.5.12-rocm720-mi35x-20260519
   model: amd/DeepSeek-R1-0528-MXFP4-v2

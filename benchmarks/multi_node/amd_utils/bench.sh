@@ -55,6 +55,69 @@ source "$(dirname "$0")/../../benchmark_lib.sh"
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 
+# =============================================================================
+# Agentic trace-replay path (IS_AGENTIC=1)
+# -----------------------------------------------------------------------------
+# Replays the SemiAnalysis WEKA agentic-coding corpus against the disagg proxy
+# (ROUTER_PORT) via aiperf, once per concurrency, reusing the same
+# benchmark_lib.sh helpers as the single-node agentic path. Writes
+# ${RESULT_FILENAME}_conc<N>.json at the workspace root for the multinode
+# workflow's result collector. Gated so the default fixed-seq path is untouched.
+# =============================================================================
+if [[ "${IS_AGENTIC:-0}" == "1" ]]; then
+    export INFMAX_CONTAINER_WORKSPACE="${INFMAX_CONTAINER_WORKSPACE:-$REPO_ROOT}"
+    export MODEL="${MODEL:-$BENCH_MODEL}"
+    export PORT="$ROUTER_PORT"
+    export DURATION="${DURATION:-1800}"
+    # 052726-256k is supported by resolve_trace_source on main; override per recipe.
+    export WEKA_LOADER_OVERRIDE="${WEKA_LOADER_OVERRIDE:-semianalysis_cc_traces_weka_with_subagents_256k}"
+    # Write per-conc result JSONs straight into the host-mounted logs dir so the
+    # runner-side collector (launch_mi355x-amds.sh) can stage them to the workspace.
+    AGENTIC_OUTPUT_DIR="${AGENTIC_OUTPUT_DIR:-/benchmark_logs}"
+    export AGENTIC_OUTPUT_DIR
+    RESULT_FILENAME_BASE="${RESULT_FILENAME:-agentic_bench}"
+
+    echo "[BENCH] IS_AGENTIC=1 -> agentic trace replay (model=$MODEL port=$PORT dur=${DURATION}s conc=${concurrency_list})"
+    resolve_trace_source
+    install_agentic_deps
+
+    # The multinode workflow runs ONE conc per matrix job and its RESULT_FILENAME
+    # already encodes the conc (..._conc8_..._08). So for a single conc, write
+    # exactly ${RESULT_FILENAME}.json (no extra _conc suffix, which broke the
+    # workflow's success gate). Only suffix when this script sweeps >1 conc.
+    n_concs=${#chosen_concurrencies[@]}
+    any_failed=0
+    for max_concurrency in "${chosen_concurrencies[@]}"; do
+        echo "=========================================="
+        echo "Agentic replay: conc=$max_concurrency"
+        echo "=========================================="
+        CONC_RESULT_DIR="${profile_folder}/conc${max_concurrency}"
+        mkdir -p "$CONC_RESULT_DIR"
+        export CONC="$max_concurrency" USERS="$max_concurrency"
+        if [[ "$n_concs" -gt 1 ]]; then
+            PER_RF="${RESULT_FILENAME_BASE}_conc${max_concurrency}"
+        else
+            PER_RF="${RESULT_FILENAME_BASE}"
+        fi
+        build_replay_cmd "$CONC_RESULT_DIR"
+        RESULT_DIR="$CONC_RESULT_DIR" \
+        AGENTIC_OUTPUT_DIR="$AGENTIC_OUTPUT_DIR" \
+        RESULT_FILENAME="$PER_RF" \
+            run_agentic_replay_and_write_outputs "$CONC_RESULT_DIR" || any_failed=1
+        echo "-----------------------------------------"
+        sleep 10
+    done
+    if [[ "$any_failed" -ne 0 ]]; then
+        echo "WARNING: at least one agentic conc exited non-zero. Dumping proxy/engine logs for diagnosis:" >&2
+        for _l in "${log_path}"/mc_pd_proxy.log "${log_path}"/prefill_*.log "${log_path}"/mc_master.log; do
+            [ -f "$_l" ] || continue
+            echo "===== tail $_l =====" >&2
+            tail -n 40 "$_l" 2>/dev/null | tr '\r' '\n' | grep -aiE "proxy|error|exception|traceback|500|400|mooncake|lmcache|fail|refused" | tail -25 >&2
+        done
+    fi
+    exit 0
+fi
+
 for max_concurrency in "${chosen_concurrencies[@]}"; do
 
     export_file="${profile_folder}/concurrency_${max_concurrency}_req_rate_${chosen_req_rate}_gpus_$((prefill_gpus+decode_gpus))_ctx_${prefill_gpus}_gen_${decode_gpus}"

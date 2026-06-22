@@ -2,6 +2,10 @@
 
 source "$(dirname "$0")/../benchmark_lib.sh"
 
+# Agentic multinode sweeps pass a single CONC (not CONC_LIST); normalize so the
+# same launcher serves both the fixed-seq-len and agentic-coding scenarios.
+export CONC_LIST="${CONC_LIST:-${CONC:-}}"
+
 check_env_vars \
     CONC_LIST \
     ISL \

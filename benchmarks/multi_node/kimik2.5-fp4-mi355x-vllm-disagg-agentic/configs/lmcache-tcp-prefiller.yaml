@@ -1,0 +1,27 @@
+# MI355X (ionic) Kimi-K2.5-MXFP4 — 1P1D PREFILLER (g06).
+# Mooncake-TCP L3 + LMCacheConnectorV1, all three tiers ON:
+#   L1 = vLLM GPU prefix cache  (engine flag --enable-prefix-caching)
+#   L2 = LMCache local_cpu      (host DRAM; node-local agentic reuse; not NIC-registered)
+#   L3 = mooncakestore over TCP (cross-node shared pool; host-DRAM, no ionic MR limit)
+#
+# CPU-mem sized per the SA single-node agent recipe (l1-size-gb 1200 => ~1200GB/node).
+# On ionic, RDMA host MR is capped (single MR <=64MiB, ~3.8GiB total/node), so the
+# cross-node L3 uses TCP (no NIC registration) to get a large pool.
+local_cpu: True
+max_local_cpu_size: 150                 # GB PER TP WORKER (~1200GB/node across TP8), per SA recipe
+numa_mode: "auto"                       # multi-NIC/NUMA tail-latency
+remote_url: "mooncakestore://10.24.112.182:50051/"
+pre_caching_hash_algorithm: sha256_cbor_64bit   # + PYTHONHASHSEED=0 (set by launcher)
+
+extra_config:
+  protocol: "tcp"
+  device_name: ""
+  local_hostname: "10.24.112.182"       # g06 (this node = master)
+  mooncake_master_server_addr: "10.24.112.182:50051"   # key mooncake actually reads
+  master_server_address: "10.24.112.182:50051"
+  metadata_server: "http://10.24.112.182:8080/metadata"
+  global_segment_size: 274877906944     # 256 GiB TCP L3 pool / engine (host-DRAM bound; node ~3TB). Tunable up.
+  local_buffer_size: 4294967296         # 4 GiB staging buffer
+  save_chunk_meta: True                 # keep LMCache CPU cache off the NIC registration path
+  use_exists_sync: true
+  mooncake_prefer_local_alloc: true

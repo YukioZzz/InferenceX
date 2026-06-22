@@ -182,6 +182,95 @@ echo "PREFILL_SERVER_CONFIG (after TP/EP/DP): $PREFILL_SERVER_CONFIG"
 echo "DECODE_SERVER_CONFIG (after TP/EP/DP): $DECODE_SERVER_CONFIG"
 
 # =============================================================================
+# Optional: force-enable APC / prefix caching (vLLM "radix cache" = L1 tier).
+# Some model entries ship --no-enable-prefix-caching (e.g. Kimi-K2.5-MXFP4);
+# ENABLE_PREFIX_CACHING=1 strips that opt-out and adds --enable-prefix-caching
+# on both prefill and decode. Gated so other recipes are unaffected.
+# =============================================================================
+if [[ "${ENABLE_PREFIX_CACHING:-0}" == "1" ]]; then
+    for _cfg in PREFILL_SERVER_CONFIG DECODE_SERVER_CONFIG; do
+        _val="${!_cfg}"
+        _val="${_val//--no-enable-prefix-caching/}"
+        if ! echo "$_val" | grep -q -- '--enable-prefix-caching'; then
+            _val+=" --enable-prefix-caching"
+        fi
+        printf -v "$_cfg" '%s' "$_val"
+    done
+    echo "[vLLM] ENABLE_PREFIX_CACHING=1 -> prefix/radix cache (L1) enabled on prefill + decode"
+fi
+
+# =============================================================================
+# KV connector selection: MoRIIO (default) | LMCache + Mooncake distributed store
+# -----------------------------------------------------------------------------
+# Default = MoRIIOConnector (unchanged upstream behavior). When
+# KV_CONNECTOR=lmcache-mooncake we instead run a single LMCacheConnectorV1
+# (kv_both on every node) backed by a Mooncake store, with all reuse tiers:
+#   L1 vLLM APC (ENABLE_PREFIX_CACHING) + L2 LMCache local_cpu host DRAM +
+#   L3 mooncakestore (cross-node). Mooncake-TCP is the default L3 transport on
+#   MI355X ionic NICs (host RDMA MR registration is capped <=64MiB/MR,
+#   ~3.8GiB/node; TCP has no NIC registration limit so the L3 pool can be large).
+# =============================================================================
+KV_CONNECTOR="${KV_CONNECTOR:-moriio}"
+_MORIIO_EXTRA="\"kv_connector_extra_config\": {\"proxy_ip\": \"${NODE0_ADDR}\", \"proxy_ping_port\": \"${PROXY_PING_PORT:-36367}\", \"http_port\": \"${SERVER_PORT}\"}"
+KVT_PREFILL="{\"kv_connector\": \"MoRIIOConnector\", \"kv_role\": \"kv_producer\", ${_MORIIO_EXTRA}}"
+KVT_DECODE="{\"kv_connector\": \"MoRIIOConnector\", \"kv_role\": \"kv_consumer\", ${_MORIIO_EXTRA}}"
+
+if [[ "$KV_CONNECTOR" == "lmcache-mooncake" ]]; then
+    # Override the container's mooncake .so with the hipseg-patched build, if a
+    # patched-.so dir is mounted (EXTRA_DOCKER_MOUNTS). The patch stops
+    # HipTransport::install() from clobbering the segment protocol to "hip",
+    # which otherwise breaks cross-node segment open on both TCP and RDMA.
+    MC_PATCHED_SO_DIR="${MC_PATCHED_SO_DIR:-/mc_dmabuf_so}"
+    if [[ -d "$MC_PATCHED_SO_DIR" ]]; then
+        _mcpkg=$(python3 -c "import mooncake, os; print(os.path.dirname(mooncake.__file__))" 2>/dev/null || true)
+        if [[ -n "$_mcpkg" && -d "$_mcpkg" ]]; then
+            for _so in engine store; do
+                _src=$(ls "$MC_PATCHED_SO_DIR"/${_so}*.so 2>/dev/null | head -1)
+                [[ -n "$_src" ]] && cp -f "$_src" "$_mcpkg/" && echo "[Mooncake] overrode ${_so}.so from $MC_PATCHED_SO_DIR"
+            done
+        fi
+    fi
+    MC_MASTER_ADDR_EFF="${MC_MASTER_ADDR:-${NODE0_ADDR}:${MC_MASTER_PORT:-50051}}"
+    MC_METADATA_URL="http://${NODE0_ADDR}:${MC_METADATA_PORT:-8080}/metadata"
+    LMC_CFG_DIR="/run_logs/slurm_job-${SLURM_JOB_ID}"
+    mkdir -p "$LMC_CFG_DIR"
+    LMCACHE_CONFIG_FILE="${LMC_CFG_DIR}/lmcache_rank${NODE_RANK}.yaml"
+    # Decoders pull the remote (prefill) segment; prefill prefers local alloc.
+    _prefer_local=true
+    [[ "$NODE_RANK" -ge "$xP" ]] && _prefer_local=false
+    cat > "$LMCACHE_CONFIG_FILE" <<LMCEOF
+local_cpu: ${LMCACHE_LOCAL_CPU:-True}
+max_local_cpu_size: ${LMCACHE_MAX_LOCAL_CPU_GB:-150}
+numa_mode: "auto"
+remote_url: "mooncakestore://${MC_MASTER_ADDR_EFF}/"
+pre_caching_hash_algorithm: sha256_cbor_64bit
+extra_config:
+  protocol: "${MC_PROTOCOL:-tcp}"
+  device_name: "${MC_DEVICE:-}"
+  local_hostname: "${host_ip}"
+  mooncake_master_server_addr: "${MC_MASTER_ADDR_EFF}"
+  master_server_address: "${MC_MASTER_ADDR_EFF}"
+  metadata_server: "${MC_METADATA_URL}"
+  global_segment_size: ${MC_GLOBAL_SEG:-274877906944}
+  local_buffer_size: ${MC_LOCAL_BUFFER:-4294967296}
+  save_chunk_meta: True
+  use_exists_sync: true
+  mooncake_prefer_local_alloc: ${_prefer_local}
+LMCEOF
+    echo "[LMCache] rank=${NODE_RANK} wrote $LMCACHE_CONFIG_FILE (master=$MC_MASTER_ADDR_EFF proto=${MC_PROTOCOL:-tcp} prefer_local=$_prefer_local)"
+    export LMCACHE_CONFIG_FILE
+    export LMCACHE_USE_EXPERIMENTAL=True
+    export PYTHONHASHSEED=0
+    [[ "${MC_PROTOCOL:-tcp}" == "tcp" ]] && export MC_FORCE_TCP=1
+    # CheckRegisterMemoryParams enforces MC_MAX_MR_SIZE even for TCP; keep it
+    # large for TCP, or 64MiB for the (capped) ionic host-RDMA path.
+    export MC_MAX_MR_SIZE="${MC_MAX_MR_SIZE:-137438953472}"
+    KVT_PREFILL="{\"kv_connector\": \"LMCacheConnectorV1\", \"kv_role\": \"kv_both\", \"kv_load_failure_policy\": \"recompute\"}"
+    KVT_DECODE="$KVT_PREFILL"
+    echo "[KV] KV_CONNECTOR=lmcache-mooncake -> LMCacheConnectorV1 (kv_both) on all roles"
+fi
+
+# =============================================================================
 # Container Synchronization
 # =============================================================================
 
@@ -248,15 +337,28 @@ if [ "$NODE_RANK" -eq 0 ]; then
 
     setup_vllm_env
 
-    # Router is started as an external container by job.slurm (VLLM_ROUTER_IMAGE)
-    echo "Using external vllm-router container (started by job.slurm on this node)"
+    if [[ "$KV_CONNECTOR" == "lmcache-mooncake" ]]; then
+        # Start the Mooncake master + HTTP metadata server in-container on node 0.
+        # LMCache store clients (all ranks) connect here during engine init, so it
+        # must be up before the prefill/decode vllm serve processes start.
+        MC_MASTER_LOG="/run_logs/slurm_job-${SLURM_JOB_ID}/mooncake_master.log"
+        echo "[Mooncake] starting master on 0.0.0.0:${MC_MASTER_PORT:-50051} (metadata :${MC_METADATA_PORT:-8080})"
+        ( mooncake_master --enable_http_metadata_server=1 \
+            --http_metadata_server_host=0.0.0.0 --http_metadata_server_port=${MC_METADATA_PORT:-8080} \
+            --rpc_address=0.0.0.0 --port=${MC_MASTER_PORT:-50051} -v=1 > "$MC_MASTER_LOG" 2>&1 & ) || \
+            echo "[Mooncake] WARN: master failed to start (see $MC_MASTER_LOG)"
+        sleep 6
+    else
+        # Router is started as an external container by job.slurm (VLLM_ROUTER_IMAGE)
+        echo "Using external vllm-router container (started by job.slurm on this node)"
+    fi
 
     SERVED_MODEL="${MODEL_NAME}"
     PREFILL_CMD="vllm serve ${MODEL_PATH} \
         --served-model-name ${SERVED_MODEL} \
         --port $SERVER_PORT \
         --trust-remote-code \
-        --kv-transfer-config '{\"kv_connector\": \"MoRIIOConnector\", \"kv_role\": \"kv_producer\", \"kv_connector_extra_config\": {\"proxy_ip\": \"${NODE0_ADDR}\", \"proxy_ping_port\": \"${PROXY_PING_PORT}\", \"http_port\": \"${SERVER_PORT}\"}}' \
+        --kv-transfer-config '${KVT_PREFILL}' \
         ${PREFILL_SERVER_CONFIG}"
 
     if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -281,6 +383,20 @@ if [ "$NODE_RANK" -eq 0 ]; then
     fi
 
     echo "Congratulations!!! All prefill and decode servers are up . . ."
+
+    if [[ "$KV_CONNECTOR" == "lmcache-mooncake" ]]; then
+        # Start the minimal 1P1D PD proxy in-container on node 0 (owns ROUTER_PORT).
+        # prefiller = this node; decoder = first decode node (IP_ARRAY[xP]).
+        MC_PROXY_DECODER_IP="${IP_ARRAY[$xP]:-${NODE0_ADDR}}"
+        MC_PROXY_LOG="/run_logs/slurm_job-${SLURM_JOB_ID}/mc_pd_proxy.log"
+        echo "[Mooncake] starting mc_pd_proxy :${ROUTER_PORT} (P=${NODE0_ADDR}:${SERVER_PORT} D=${MC_PROXY_DECODER_IP}:${SERVER_PORT})"
+        python3 -c 'import httpx,fastapi,uvicorn' 2>/dev/null || pip install -q httpx fastapi uvicorn
+        ( python3 "$WS_PATH/mc_pd_proxy.py" --host 0.0.0.0 --port "${ROUTER_PORT}" \
+            --prefiller-host "${NODE0_ADDR}" --prefiller-port "${SERVER_PORT}" \
+            --decoder-host "${MC_PROXY_DECODER_IP}" --decoder-port "${SERVER_PORT}" \
+            > "$MC_PROXY_LOG" 2>&1 & ) || echo "[Mooncake] WARN: proxy failed to start (see $MC_PROXY_LOG)"
+        sleep 4
+    fi
 
     # Wait for proxy /health to confirm it is accepting requests
     HEALTH_BARRIER_CMD="python3 $WS_PATH/sync.py barrier \
@@ -422,7 +538,7 @@ elif [ "$NODE_RANK" -gt 0 ] && [ "$NODE_RANK" -lt "$xP" ]; then
         --served-model-name ${SERVED_MODEL} \
         --port $SERVER_PORT \
         --trust-remote-code \
-        --kv-transfer-config '{\"kv_connector\": \"MoRIIOConnector\", \"kv_role\": \"kv_producer\", \"kv_connector_extra_config\": {\"proxy_ip\": \"${NODE0_ADDR}\", \"proxy_ping_port\": \"${PROXY_PING_PORT}\", \"http_port\": \"${SERVER_PORT}\"}}' \
+        --kv-transfer-config '${KVT_PREFILL}' \
         ${PREFILL_SERVER_CONFIG}"
 
     if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -478,7 +594,7 @@ else
         --served-model-name ${SERVED_MODEL} \
         --port $SERVER_PORT \
         --trust-remote-code \
-        --kv-transfer-config '{\"kv_connector\": \"MoRIIOConnector\", \"kv_role\": \"kv_consumer\", \"kv_connector_extra_config\": {\"proxy_ip\": \"${NODE0_ADDR}\", \"proxy_ping_port\": \"${PROXY_PING_PORT}\", \"http_port\": \"${SERVER_PORT}\"}}' \
+        --kv-transfer-config '${KVT_DECODE}' \
         ${DECODE_SERVER_CONFIG}"
 
     if [[ "$DRY_RUN" -eq 1 ]]; then

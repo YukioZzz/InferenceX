@@ -4028,3 +4028,10 @@
     - "Recover the failed official ingest for PR #1796 from validated sweep run 27663808752 (attempt 2)"
     - "Artifact-only recovery: reuse 23 fixed-sequence rows and 2 eval rows without rerunning benchmarks"
   pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/1884
+
+- config-keys:
+    - kimik2.5-fp4-mi355x-vllm-disagg-agentic
+  description:
+    - "Add cross-node 1P1D agentic-coding recipe for Kimi-K2.5-MXFP4 on MI355X: single LMCacheConnectorV1 with all three KV reuse tiers (L1 vLLM APC + L2 LMCache local_cpu host DRAM + L3 mooncakestore over TCP), instead of MoRIIO"
+    - "amd_utils: KV_CONNECTOR=lmcache-mooncake path in server_vllm.sh (in-container mooncake master + mc_pd_proxy on node 0), IS_AGENTIC trace-replay in bench.sh, env passthrough in submit.sh/job.slurm, agentic result collection in launch_mi355x-amds.sh"
+    - "Mooncake-TCP L3 chosen because the MI355X ionic NIC caps host RDMA MR registration (<=64MiB/MR, ~3.8GiB/node); requires the hipseg-patched mooncake .so"

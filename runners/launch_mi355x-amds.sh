@@ -126,7 +126,28 @@ if [[ "$IS_MULTINODE" == "true" ]]; then
     # search for "FRAMEWORK_DIFF_IF_STATEMENT #3" for this if-statement
     # Find the latest log directory that contains the data
 
-    if [[ "${EVAL_ONLY:-false}" != "true" ]]; then
+    if [[ "${IS_AGENTIC:-0}" == "1" ]]; then
+        # Agentic disagg: bench.sh wrote per-conc ${RESULT_FILENAME}_conc<N>.json
+        # into the host-mounted logs dir (AGENTIC_OUTPUT_DIR=/benchmark_logs).
+        # Stage them to the workspace root for the workflow's result collector.
+        shopt -s nullglob
+        _agentic_found=0
+        # Primary: the workflow gate looks for exactly ${RESULT_FILENAME}.json
+        # (RESULT_FILENAME already encodes the per-job conc). Also accept the
+        # _conc* variant for local multi-conc sweeps.
+        for result_file in \
+            "$BENCHMARK_LOGS_DIR"/${RESULT_FILENAME}.json \
+            "$BENCHMARK_LOGS_DIR"/logs/*/${RESULT_FILENAME}.json \
+            "$BENCHMARK_LOGS_DIR"/${RESULT_FILENAME}_conc*.json \
+            "$BENCHMARK_LOGS_DIR"/logs/*/${RESULT_FILENAME}_conc*.json; do
+            [ -f "$result_file" ] || continue
+            cp "$result_file" "$GITHUB_WORKSPACE/$(basename "$result_file")"
+            echo "Staged agentic result $(basename "$result_file")"
+            _agentic_found=1
+        done
+        shopt -u nullglob
+        [[ "$_agentic_found" -eq 0 ]] && echo "WARNING: no agentic ${RESULT_FILENAME}*.json found under $BENCHMARK_LOGS_DIR"
+    elif [[ "${EVAL_ONLY:-false}" != "true" ]]; then
         cat > collect_latest_results.py <<'PY'
 import os, sys
 job_dir, isl, osl, nexp, framework = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]

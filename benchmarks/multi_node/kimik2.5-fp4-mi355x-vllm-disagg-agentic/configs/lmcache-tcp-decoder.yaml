@@ -1,0 +1,20 @@
+# MI355X (ionic) Kimi-K2.5-MXFP4 — 1P1D DECODER (g05). Shares g06's Mooncake master.
+# Same tiering as the prefiller (L1 GPU APC + L2 host CPU + L3 Mooncake-TCP).
+local_cpu: True
+max_local_cpu_size: 150                 # GB PER TP WORKER (~1200GB/node across TP8), per SA recipe
+numa_mode: "auto"
+remote_url: "mooncakestore://10.24.112.182:50051/"
+pre_caching_hash_algorithm: sha256_cbor_64bit
+
+extra_config:
+  protocol: "tcp"
+  device_name: ""
+  local_hostname: "10.24.112.181"       # g05 (this node)
+  mooncake_master_server_addr: "10.24.112.182:50051"   # g06 master (shared)
+  master_server_address: "10.24.112.182:50051"
+  metadata_server: "http://10.24.112.182:8080/metadata"
+  global_segment_size: 274877906944     # 256 GiB TCP L3 pool / engine
+  local_buffer_size: 4294967296         # 4 GiB staging buffer
+  save_chunk_meta: True
+  use_exists_sync: true
+  mooncake_prefer_local_alloc: false    # decoder pulls remote (g06) segment
