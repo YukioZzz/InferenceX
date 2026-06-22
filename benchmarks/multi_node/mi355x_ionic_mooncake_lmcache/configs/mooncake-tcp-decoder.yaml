@@ -1,0 +1,21 @@
+# LMCache decoder (g06) for 1P1D cross-node: shares the SAME Mooncake pool/master
+# on g05 (10.24.112.181:50051). local_hostname is THIS node (g06, 10.24.112.182) so
+# its segment is addressable; master/metadata stay on g05. Decoder retrieves the
+# prompt-prefix KV that the g05 prefiller stored into the pool -> cross-node handoff
+# over Mooncake TCP. local_cpu L2 kept on (realistic agentic decode-side reuse).
+local_cpu: True
+max_local_cpu_size: 300
+remote_url: "mooncakestore://10.24.112.181:50051/"
+pre_caching_hash_algorithm: sha256_cbor_64bit
+
+extra_config:
+  protocol: "tcp"
+  device_name: ""
+  local_hostname: "10.24.112.182"            # g06 (this node)
+  master_server_address: "10.24.112.181:50051"   # g05 master (shared)
+  metadata_server: "http://10.24.112.181:8080/metadata"
+  global_segment_size: 21474836480
+  local_buffer_size: 1073741824
+  save_chunk_meta: True
+  use_exists_sync: true
+  mooncake_prefer_local_alloc: true

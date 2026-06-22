@@ -1,0 +1,20 @@
+# LMCache config: Mooncake store backend over RDMA (minimal verify, single node g05).
+# local_cpu False so ALL reuse goes through the Mooncake RDMA store (exercises the
+# RDMA path we want to validate). save_chunk_meta True is the fix for NIC memory-
+# registration limits (the earlier "hipbuffer descriptor corruption" symptom).
+local_cpu: False
+max_local_cpu_size: 5          # GB, required even when local_cpu False
+remote_url: "mooncakestore://10.24.112.181:50051/"
+pre_caching_hash_algorithm: sha256_cbor_64bit
+
+extra_config:
+  protocol: "rdma"             # the thing we are validating on MI355 AINIC
+  device_name: ""              # autodetect ionic NICs (libionic in container)
+  local_hostname: "10.24.112.181"
+  master_server_address: "10.24.112.181:50051"
+  metadata_server: "http://10.24.112.181:8080/metadata"
+  global_segment_size: 21474836480   # 20 GiB per worker contributed to the pool
+  local_buffer_size: 1073741824      # 1 GiB local buffer (save_chunk_meta path)
+  save_chunk_meta: True              # <-- avoids registering LMCache's big CPU buffer
+  use_exists_sync: true
+  mooncake_prefer_local_alloc: true

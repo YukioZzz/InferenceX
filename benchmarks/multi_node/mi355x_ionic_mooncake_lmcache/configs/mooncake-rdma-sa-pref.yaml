@@ -1,0 +1,29 @@
+# 1P1D prefiller (g06) — Mooncake RDMA + LMCacheConnectorV1, SA-agent-tuned.
+# ionic-aware tiering (per LMCache mooncake docs "constrained NIC" guidance):
+#   L2 = big local host-DRAM CPU cache (local_cpu True) -> carries agentic prefix
+#        reuse on this prefiller; NOT directly RDMA-registered (save_chunk_meta
+#        True), so it dodges ionic's ~3.8GiB host-MR ceiling.
+#   L3 = small Mooncake RDMA pool (global_segment 2GiB, 64MiB MRs) -> only the
+#        cross-node PD KV handoff. local_buffer = 64MiB registered staging.
+local_cpu: False
+max_local_cpu_size: 5
+numa_mode: "auto"
+remote_url: "mooncakestore://10.24.112.182:50051/"
+pre_caching_hash_algorithm: sha256_cbor_64bit
+
+extra_config:
+  protocol: "tcp"
+  device_name: ""
+  local_hostname: "10.24.112.182"               # g06 (this node = master)
+  # FIX: mooncake setup(dict) reads "master_server_addr" (LMCache's
+  # "master_server_address" is ignored -> silently defaulted to 127.0.0.1:50051,
+  # which broke cross-node). The "mooncake_" prefix is stripped by LMCache's
+  # _build_setup_dict and forwarded with highest priority.
+  mooncake_master_server_addr: "10.24.112.182:50051"
+  master_server_address: "10.24.112.182:50051"
+  metadata_server: "http://10.24.112.182:8080/metadata"
+  global_segment_size: 68719476736              # 64 GiB — TCP has no ibv_reg_mr limit, so L3 can be big (host-DRAM bound)
+  local_buffer_size: 4294967296                 # 4 GiB staging — TCP path, no NIC registration limit
+  save_chunk_meta: True
+  use_exists_sync: true
+  mooncake_prefer_local_alloc: true

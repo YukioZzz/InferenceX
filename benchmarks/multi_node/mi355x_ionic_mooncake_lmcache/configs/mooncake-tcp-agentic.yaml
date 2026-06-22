@@ -1,0 +1,18 @@
+# LMCache: Mooncake store over TCP (proven on MI355) + large CPU L2 for agentic reuse.
+# RDMA blocked by ionic ibv_reg_mr INVALID_PARAMS (mooncake GPUDirect path); TCP works.
+local_cpu: True                # L2 CPU cache (the single-node agentic reuse win)
+max_local_cpu_size: 300        # GB host RAM for L2 prefix KV (sized for agentic working set)
+remote_url: "mooncakestore://10.24.112.181:50051/"
+pre_caching_hash_algorithm: sha256_cbor_64bit
+
+extra_config:
+  protocol: "tcp"              # RDMA fails registration on ionic; TCP is proven
+  device_name: ""
+  local_hostname: "10.24.112.181"
+  master_server_address: "10.24.112.181:50051"
+  metadata_server: "http://10.24.112.181:8080/metadata"
+  global_segment_size: 21474836480   # 20 GiB L3 segment per worker
+  local_buffer_size: 1073741824
+  save_chunk_meta: True
+  use_exists_sync: true
+  mooncake_prefer_local_alloc: true

@@ -1,0 +1,22 @@
+# 1P1D decoder (g05) — Mooncake RDMA + LMCacheConnectorV1, SA-agent-tuned.
+# Shares g06's master; pulls prompt KV from g06's segment over RDMA on cold L2.
+# ionic-aware tiering: big local host L2 (not RDMA-registered) + small RDMA L3.
+local_cpu: False
+max_local_cpu_size: 5
+numa_mode: "auto"
+remote_url: "mooncakestore://10.24.112.182:50051/"
+pre_caching_hash_algorithm: sha256_cbor_64bit
+
+extra_config:
+  protocol: "tcp"
+  device_name: ""
+  local_hostname: "10.24.112.181"               # g05 (this node)
+  # FIX: forward the master addr under the key mooncake actually reads.
+  mooncake_master_server_addr: "10.24.112.182:50051"   # g06 master (shared)
+  master_server_address: "10.24.112.182:50051"
+  metadata_server: "http://10.24.112.182:8080/metadata"
+  global_segment_size: 68719476736              # 64 GiB — TCP has no ibv_reg_mr limit, so L3 can be big (host-DRAM bound)
+  local_buffer_size: 4294967296                 # 4 GiB staging — TCP path, no NIC registration limit
+  save_chunk_meta: True
+  use_exists_sync: true
+  mooncake_prefer_local_alloc: false             # pull remote (g06) segment
