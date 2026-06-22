@@ -43,7 +43,12 @@ Kimi-K2.5-MXFP4:
   # cudagraph_mode is PIECEWISE (vs the non-disagg default full graph)
   # because the KV connector inserts ops that can break full-graph capture;
   # try DISAGG_CUDAGRAPH_MODE=FULL_AND_PIECEWISE to A/B if decode is graph-bound.
-  prefill_flags: "--tensor-parallel-size 8 --compilation-config '{\"cudagraph_mode\":\"PIECEWISE\"}' --no-enable-prefix-caching --kv-cache-dtype fp8 --block-size 1 --gpu-memory-utilization 0.90 --mm-encoder-tp-mode data"
+  # Prefill runs expert-parallel with the mori all2all backend (matches decode):
+  # the 1T MoE prefill was the 1P2D pipeline bottleneck under EP1 dense, starving
+  # the EP8 decode nodes. --enable-expert-parallel is also injected by
+  # server_vllm.sh when the matrix sets prefill ep>1 (grep-guarded, no dup), but
+  # the mori a2a backend must be set here.
+  prefill_flags: "--tensor-parallel-size 8 --enable-expert-parallel --all2all-backend mori --compilation-config '{\"cudagraph_mode\":\"PIECEWISE\"}' --no-enable-prefix-caching --kv-cache-dtype fp8 --block-size 1 --gpu-memory-utilization 0.90 --mm-encoder-tp-mode data"
   decode_flags: "--tensor-parallel-size 8 --enable-expert-parallel --all2all-backend mori --compilation-config '{\"cudagraph_mode\":\"PIECEWISE\"}' --no-enable-prefix-caching --kv-cache-dtype fp8 --block-size 1 --gpu-memory-utilization 0.90 --mm-encoder-tp-mode data"
   env: "VLLM_USE_V1=1 VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_PAGED_ATTN=1 VLLM_ROCM_USE_AITER_RMSNORM=1 VLLM_USE_AITER_TRITON_SILU_MUL=1 VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4 VLLM_ENGINE_READY_TIMEOUT_S=3600"
   hf_dir: "models--amd--Kimi-K2.5-MXFP4"

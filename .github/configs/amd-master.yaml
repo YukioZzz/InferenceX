@@ -1536,13 +1536,16 @@ kimik2.5-fp4-mi355x-vllm-disagg:
     - isl: 1024
       osl: 1024
       search-space:
-      # 1P2D: 1 prefill node (co-located with proxy) + 2 decode nodes = 3 nodes total 
+      # 1P2D: 1 prefill node (co-located with proxy) + 2 decode nodes = 3 nodes total
+      # Prefill runs EP8 (+ mori a2a, set in models_vllm.yaml prefill_flags): the
+      # 1T MoE prefill was the pipeline bottleneck under EP1 dense, starving the
+      # two EP8 decode nodes. Enabling prefill EP unblocks KV production.
       - spec-decoding: "none"
         conc-list: [ 8, 16, 32, 64, 128, 256, 512 ]
         prefill:
           num-worker: 1
           tp: 8
-          ep: 1
+          ep: 8
           dp-attn: false
           additional-settings:
           - "PREFILL_NODES=1"
@@ -1563,7 +1566,7 @@ kimik2.5-fp4-mi355x-vllm-disagg:
         prefill:
           num-worker: 1
           tp: 8
-          ep: 1
+          ep: 8
           dp-attn: false
           additional-settings:
           - "PREFILL_NODES=1"
