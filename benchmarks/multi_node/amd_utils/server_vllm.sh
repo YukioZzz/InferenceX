@@ -222,6 +222,64 @@ echo "Decode  node IPs: ${DECODE_ARGS}"
 # MoRI-IO proxy ZMQ registration port (must match vllm-router --vllm-discovery-address)
 PROXY_PING_PORT="${PROXY_PING_PORT:-36367}"
 
+# =============================================================================
+# KV transfer config
+# =============================================================================
+# The P/D transfer itself is always MoRIIO. When the matrix also asks for a CPU
+# DRAM tier (kv-offloading: dram), the two are composed with MultiConnector
+# instead of picking one, mirroring the shape the NVIDIA agentic recipes use for
+# PD-plus-store (see benchmarks/multi_node/srt-slurm-recipes/vllm/deepseek-v4/
+# agentic/disagg-*-agentic.yaml: outer kv_role kv_both, each child carrying its
+# own role).
+#
+# The tier is attached to the PREFILL side only. That is not a simplification:
+# utils/matrix_logic/generate_sweep_configs.py::agentic_dram_offload_gb sizes
+# TOTAL_CPU_DRAM_GB from the *prefill* worker's per-node GPU footprint precisely
+# because "only prefill offloads KV to CPU DRAM today". Giving the decoder a tier
+# too would spend a budget that was never computed for it.
+#
+# Escaping note: these strings are interpolated into PREFILL_CMD/DECODE_CMD and
+# then `eval`-ed, so JSON is wrapped in single quotes with \"-escaped double
+# quotes inside -- the single quotes are what survives the second parse.
+build_kv_transfer_configs() {
+    local moriio_prefill moriio_decode
+    moriio_prefill="{\\\"kv_connector\\\": \\\"MoRIIOConnector\\\", \\\"kv_role\\\": \\\"kv_producer\\\", \\\"kv_connector_extra_config\\\": {\\\"proxy_ip\\\": \\\"${NODE0_ADDR}\\\", \\\"proxy_ping_port\\\": \\\"${PROXY_PING_PORT}\\\", \\\"http_port\\\": \\\"${SERVER_PORT}\\\", \\\"read_mode\\\": true}}"
+    moriio_decode="{\\\"kv_connector\\\": \\\"MoRIIOConnector\\\", \\\"kv_role\\\": \\\"kv_consumer\\\", \\\"kv_connector_extra_config\\\": {\\\"proxy_ip\\\": \\\"${NODE0_ADDR}\\\", \\\"proxy_ping_port\\\": \\\"${PROXY_PING_PORT}\\\", \\\"http_port\\\": \\\"${SERVER_PORT}\\\", \\\"read_mode\\\": true}}"
+
+    KV_TRANSFER_PREFILL="'${moriio_prefill}'"
+    KV_TRANSFER_DECODE="'${moriio_decode}'"
+
+    if [[ "${KV_OFFLOADING:-none}" == "dram" && "${KV_OFFLOAD_BACKEND:-}" == "vllm-simple" ]]; then
+        if [[ -z "${TOTAL_CPU_DRAM_GB:-}" || "${TOTAL_CPU_DRAM_GB}" == "0" ]]; then
+            echo "ERROR: kv-offloading=dram with backend vllm-simple but TOTAL_CPU_DRAM_GB is unset." >&2
+            echo "       The agentic matrix derives it from dram-utilization; it must be consumed as given." >&2
+            exit 1
+        fi
+        local per_rank
+        per_rank=$(( TOTAL_CPU_DRAM_GB * 1000 * 1000 * 1000 / PREFILL_TP_SIZE ))
+        local simple
+        simple="{\\\"kv_connector\\\": \\\"SimpleCPUOffloadConnector\\\", \\\"kv_role\\\": \\\"kv_both\\\", \\\"kv_connector_extra_config\\\": {\\\"cpu_bytes_to_use_per_rank\\\": ${per_rank}, \\\"lazy_offload\\\": false}}"
+        KV_TRANSFER_PREFILL="'{\\\"kv_connector\\\": \\\"MultiConnector\\\", \\\"kv_role\\\": \\\"kv_both\\\", \\\"kv_connector_extra_config\\\": {\\\"connectors\\\": [${moriio_prefill}, ${simple}]}}'"
+        echo "[kv] prefill = MultiConnector[MoRIIO(kv_producer) + SimpleCPUOffload(${per_rank} B/rank x ${PREFILL_TP_SIZE})]"
+        echo "[kv] decode  = MoRIIO(kv_consumer)"
+    else
+        echo "[kv] MoRIIO only (kv-offloading=${KV_OFFLOADING:-none} backend=${KV_OFFLOAD_BACKEND:-none})"
+    fi
+}
+
+# =============================================================================
+# Model-specific in-container patches
+# =============================================================================
+# Kimi-K3 needs MoRIIO support for its hybrid MLA+KDA state, per-layer KV block
+# lengths and the DSpark draft-layer skip. Carried as a patch so a disagg run
+# installs the same way the single-node recipe does.
+apply_model_patches() {
+    if [[ "${MODEL_NAME}" == "Kimi-K3" ]]; then
+        bash "$(dirname "${BASH_SOURCE[0]}")/apply_k3_moriio_patches.sh" \
+            || { echo "ERROR: apply_k3_moriio_patches.sh failed" >&2; exit 1; }
+    fi
+}
+
 # vLLM runtime environment (static vars moved to env.sh; these depend on per-node state)
 setup_vllm_env() {
     export VLLM_NIXL_SIDE_CHANNEL_HOST=${rdma_ip}
@@ -261,12 +319,14 @@ if [ "$NODE_RANK" -eq 0 ]; then
     # Router is started as an external container by job.slurm (VLLM_ROUTER_IMAGE)
     echo "Using external vllm-router container (started by job.slurm on this node)"
 
+    apply_model_patches
+    build_kv_transfer_configs
     SERVED_MODEL="${MODEL_NAME}"
     PREFILL_CMD="vllm serve ${MODEL_PATH} \
         --served-model-name ${SERVED_MODEL} \
         --port $SERVER_PORT \
         --trust-remote-code \
-        --kv-transfer-config '{\"kv_connector\": \"MoRIIOConnector\", \"kv_role\": \"kv_producer\", \"kv_connector_extra_config\": {\"proxy_ip\": \"${NODE0_ADDR}\", \"proxy_ping_port\": \"${PROXY_PING_PORT}\", \"http_port\": \"${SERVER_PORT}\", \"read_mode\": true}}' \
+        --kv-transfer-config ${KV_TRANSFER_PREFILL} \
         ${PREFILL_SERVER_CONFIG}"
 
     if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -432,12 +492,14 @@ elif [ "$NODE_RANK" -gt 0 ] && [ "$NODE_RANK" -lt "$xP" ]; then
         echo "[PREFILL_ENV] $env_pair"
     done
 
+    apply_model_patches
+    build_kv_transfer_configs
     SERVED_MODEL="${MODEL_NAME}"
     PREFILL_CMD="vllm serve ${MODEL_PATH} \
         --served-model-name ${SERVED_MODEL} \
         --port $SERVER_PORT \
         --trust-remote-code \
-        --kv-transfer-config '{\"kv_connector\": \"MoRIIOConnector\", \"kv_role\": \"kv_producer\", \"kv_connector_extra_config\": {\"proxy_ip\": \"${NODE0_ADDR}\", \"proxy_ping_port\": \"${PROXY_PING_PORT}\", \"http_port\": \"${SERVER_PORT}\", \"read_mode\": true}}' \
+        --kv-transfer-config ${KV_TRANSFER_PREFILL} \
         ${PREFILL_SERVER_CONFIG}"
 
     if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -488,12 +550,14 @@ else
         echo "[DECODE_ENV] $env_pair"
     done
 
+    apply_model_patches
+    build_kv_transfer_configs
     SERVED_MODEL="${MODEL_NAME}"
     DECODE_CMD="vllm serve ${MODEL_PATH} \
         --served-model-name ${SERVED_MODEL} \
         --port $SERVER_PORT \
         --trust-remote-code \
-        --kv-transfer-config '{\"kv_connector\": \"MoRIIOConnector\", \"kv_role\": \"kv_consumer\", \"kv_connector_extra_config\": {\"proxy_ip\": \"${NODE0_ADDR}\", \"proxy_ping_port\": \"${PROXY_PING_PORT}\", \"http_port\": \"${SERVER_PORT}\", \"read_mode\": true}}' \
+        --kv-transfer-config ${KV_TRANSFER_DECODE} \
         ${DECODE_SERVER_CONFIG}"
 
     if [[ "$DRY_RUN" -eq 1 ]]; then
