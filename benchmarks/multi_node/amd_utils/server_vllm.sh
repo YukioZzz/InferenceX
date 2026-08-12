@@ -270,12 +270,30 @@ build_kv_transfer_configs() {
 # =============================================================================
 # Model-specific in-container patches
 # =============================================================================
-# Kimi-K3 needs MoRIIO support for its hybrid MLA+KDA state, per-layer KV block
-# lengths and the DSpark draft-layer skip. Carried as a patch so a disagg run
-# installs the same way the single-node recipe does.
+# Kimi-K3 needs two patch stacks on this image, and a disagg run needs both for the
+# same reason the aggregate arm does:
+#
+#   1. apply_k3_container_patches.sh -- the model stack the single-node recipe
+#      installs at kimik3_fp4_mi355x_mtp.sh:181. Not optional and not P/D-specific:
+#      it carries the rocm_aiter_mla small-head multi-token MTP-verify paged-KV
+#      path, triton_mla UNIFORM_BATCH cudagraph support for the non-causal DSpark
+#      draft group, the KDA fused_recurrent state_indices coercion that PIECEWISE
+#      cudagraph boot needs, Triton 3.7.0 + tabulate for Gluon MLA, and the aiter
+#      #4521 asm verify kernels. Without it K3 does not survive warmup with a
+#      DSpark draft, disagg or not.
+#   2. apply_k3_moriio_patches.sh -- the MoRIIO side: hybrid MLA+KDA state
+#      transfer, per-layer KV block lengths, the DSpark draft-layer skip.
+#
+# The two are disjoint file by file, so order does not matter; container patches
+# run first to mirror the order the arm was validated in. Both are idempotent, so
+# every prefill/decode rank can call this.
 apply_model_patches() {
     if [[ "${MODEL_NAME}" == "Kimi-K3" ]]; then
-        bash "$(dirname "${BASH_SOURCE[0]}")/apply_k3_moriio_patches.sh" \
+        local here
+        here="$(dirname "${BASH_SOURCE[0]}")"
+        bash "${here}/../../single_node/agentic/apply_k3_container_patches.sh" \
+            || { echo "ERROR: apply_k3_container_patches.sh failed" >&2; exit 1; }
+        bash "${here}/apply_k3_moriio_patches.sh" \
             || { echo "ERROR: apply_k3_moriio_patches.sh failed" >&2; exit 1; }
     fi
 }
