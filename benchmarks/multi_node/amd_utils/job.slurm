@@ -438,6 +438,11 @@ DOCKER_ENV_COMMON=(
     -e DECODE_ROUTER_POLICY=\${DECODE_ROUTER_POLICY:-random}
     -e MORI_IO_SQ_BACKOFF_TIMEOUT_US=\${MORI_IO_SQ_BACKOFF_TIMEOUT_US:-}
     -e MORI_IO_QP_MAX_SEND_WR=\${MORI_IO_QP_MAX_SEND_WR:-}
+    # Passed through for the same reason as the two above: env.sh applies them as
+    # "${VAR:-default}", so a runner-side override only reaches the engine if the
+    # var crosses into the container.
+    -e MORI_IO_QP_MAX_CQE=\${MORI_IO_QP_MAX_CQE:-}
+    -e MORI_IO_QP_MAX_SGE=\${MORI_IO_QP_MAX_SGE:-}
     -e DECODE_TP_SIZE=\$DECODE_TP_SIZE
     -e DECODE_TP=\$DECODE_TP
     -e DECODE_NUM_WORKERS=\$DECODE_NUM_WORKERS

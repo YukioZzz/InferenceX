@@ -55,7 +55,13 @@ Kimi-K3:
   # transfer refuses any other layout ("state layout; set
   # VLLM_SSM_CONV_STATE_LAYOUT=DS"). PYTHONHASHSEED pins block hashing so identical
   # prefixes key identically across ranks, which the vllm-simple offload tier needs.
-  env: "VLLM_USE_V1=1 VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1 AITER_BF16_FP8_MOE_BOUND=0 VLLM_ROCM_AITER_MLA_ASM_PADDING=asm VLLM_USE_BREAKABLE_CUDAGRAPH=0 SAFETENSORS_FAST_GPU=1 VLLM_SSM_CONV_STATE_LAYOUT=DS PYTHONHASHSEED=42 HSA_NO_SCRATCH_RECLAIM=1 VLLM_ENGINE_READY_TIMEOUT_S=7200 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200"
+  #
+  # HSA_NO_SCRATCH_RECLAIM=0 (the single-node recipe pins 1 as a MEC FW <177 RCCL
+  # workaround): with reclaim disabled the scratch a P/D worker holds is never
+  # returned, and on this arm the KV transfer runs alongside the DSpark draft and
+  # the prefill-side CPU offload tier, so the run walks into out-of-resource. This
+  # is exported per-model after env.sh, so it is what the engines actually see.
+  env: "VLLM_USE_V1=1 VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1 AITER_BF16_FP8_MOE_BOUND=0 VLLM_ROCM_AITER_MLA_ASM_PADDING=asm VLLM_USE_BREAKABLE_CUDAGRAPH=0 SAFETENSORS_FAST_GPU=1 VLLM_SSM_CONV_STATE_LAYOUT=DS PYTHONHASHSEED=42 HSA_NO_SCRATCH_RECLAIM=0 VLLM_ENGINE_READY_TIMEOUT_S=7200 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200"
   hf_dir: "models--moonshotai--Kimi-K3"
 
 MiniMax-M2.5:
