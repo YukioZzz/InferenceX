@@ -244,9 +244,9 @@ FULL_NODELIST=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
 SELECTED_NODES=$(echo "$FULL_NODELIST" | head -n $NUM_NODES)
 SELECTED_NODELIST_STR=$(echo "$SELECTED_NODES" | tr '\n' ',' | sed 's/,$//')
 
-# Docker privilege detection — evaluated per-node since group membership varies.
-# Exported as a snippet so every srun participant resolves it locally.
-export DOCKER_CMD_DETECT='if docker ps &>/dev/null 2>&1; then DOCKER_CMD=docker; else DOCKER_CMD="sudo docker"; fi'
+# Container runtime detection — evaluated per-node since group membership varies.
+# Podman fallback enables the same job.slurm path on aac14 local allocations.
+export DOCKER_CMD_DETECT='if docker ps &>/dev/null 2>&1; then DOCKER_CMD=docker; elif podman ps &>/dev/null 2>&1; then DOCKER_CMD=podman; else DOCKER_CMD="sudo docker"; fi'
 
 # Update SLURM environment variables
 export SLURM_NNODES=$NUM_NODES
@@ -399,6 +399,33 @@ srun --nodelist="$SELECTED_NODELIST_SRUN" bash -c '
     echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1 || true
     echo "NFS cache refreshed on $(hostname)"
 '
+
+# Kimi-K3 MoRIIO write mode requires IOEngine.wait_all from ROCm/mori #341.
+# Build it once per node into a derived image before serving. This keeps package
+# installation out of the live engine container and makes a missing wait_all a
+# hard preflight failure instead of silently selecting the Python poll fallback.
+if [[ "$ENGINE" == "vllm-disagg" && "$MODEL_NAME" == "Kimi-K3" &&
+      "${MORI_WAITALL_BUILD:-0}" == "1" && "${DRY_RUN:-0}" != "1" ]]; then
+    MORI_PIN="${MORI_WAITALL_COMMIT:-f7e6ac6863c53821bc7afb91a578cc6ce38fcad0}"
+    MORI_SOURCE_DIR="${MORI_WAITALL_SOURCE_DIR:-${BENCHMARK_LOGS_DIR}/mori-${MORI_PIN:0:8}}"
+    MORI_DERIVED_IMAGE="${MORI_WAITALL_IMAGE:-localhost/k3-moriio-${SLURM_JOB_ID}:mori341}"
+
+    if [[ ! -d "$MORI_SOURCE_DIR/.git" ||
+          "$(git -C "$MORI_SOURCE_DIR" rev-parse HEAD 2>/dev/null || true)" != "$MORI_PIN" ]]; then
+        rm -rf "$MORI_SOURCE_DIR"
+        git clone --filter=blob:none https://github.com/ROCm/mori.git "$MORI_SOURCE_DIR"
+        git -C "$MORI_SOURCE_DIR" checkout -q "$MORI_PIN"
+        git -C "$MORI_SOURCE_DIR" submodule update --init --recursive --depth 1
+    fi
+    echo "[mori-image] source HEAD=$(git -C "$MORI_SOURCE_DIR" rev-parse HEAD)"
+
+    srun --nodelist="$SELECTED_NODELIST_SRUN" --nodes="$NUM_NODES" \
+        --ntasks="$NUM_NODES" --ntasks-per-node=1 \
+        bash "$DI_REPO_DIR/benchmarks/multi_node/amd_utils/prepare_mori_waitall_image.sh" \
+        "$DOCKER_IMAGE_NAME" "$MORI_DERIVED_IMAGE" "$MORI_SOURCE_DIR"
+    DOCKER_IMAGE_NAME="$MORI_DERIVED_IMAGE"
+    echo "[mori-image] serving from $DOCKER_IMAGE_NAME"
+fi
 
 # =============================================================================
 # Build engine-specific Docker environment variables

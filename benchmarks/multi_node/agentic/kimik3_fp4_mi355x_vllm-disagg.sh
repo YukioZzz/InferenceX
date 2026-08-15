@@ -69,6 +69,14 @@ export MODEL_PATH=$MODEL_PATH
 export MODEL_NAME=$MODEL_NAME
 export CONTAINER_IMAGE=$IMAGE
 
+# ── MoRIIO write + wait_all ──
+# job.slurm derives a node-local image from CONTAINER_IMAGE with the exact
+# ROCm/mori commit SGLang MI35x pins (#341 / IOEngine.wait_all). The live server
+# only verifies the baked capability; it never installs a wheel at startup.
+export MORI_WAITALL_BUILD="${MORI_WAITALL_BUILD:-1}"
+export MORI_WAITALL_COMMIT="${MORI_WAITALL_COMMIT:-f7e6ac6863c53821bc7afb91a578cc6ce38fcad0}"
+export MORIIO_READ_MODE="${MORIIO_READ_MODE:-false}"
+
 # ── Identity / result naming ──
 export MODEL_PREFIX="${MODEL_PREFIX:-kimik3}"
 export PRECISION="${PRECISION:-fp4}"
