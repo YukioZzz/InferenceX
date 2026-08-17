@@ -277,8 +277,17 @@ apply_model_patches() {
             || { echo "ERROR: apply_k3_container_patches.sh failed" >&2; exit 1; }
         bash "${here}/apply_k3_moriio_patches.sh" \
             || { echo "ERROR: apply_k3_moriio_patches.sh failed" >&2; exit 1; }
-        bash "${here}/ensure_mori_wait_all.sh" \
-            || { echo "ERROR: ensure_mori_wait_all.sh failed" >&2; exit 1; }
+        # wait_all is the WRITE path's batch barrier. In READ mode the consumer
+        # pulls and there is nothing to barrier, so requiring it there blocks a
+        # run that does not use it -- which is what happened on the DCP arm,
+        # where the relayout is consumer-side by construction (K3's KDA conv+ssm
+        # state can only be pulled by the decoder).
+        if [[ "${MORIIO_READ_MODE:-true}" == "true" ]]; then
+            echo "[k3-mori-waitall] READ mode: wait_all not required, skipping the check"
+        else
+            bash "${here}/ensure_mori_wait_all.sh" \
+                || { echo "ERROR: ensure_mori_wait_all.sh failed" >&2; exit 1; }
+        fi
     fi
 }
 
