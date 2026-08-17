@@ -1,0 +1,4 @@
+# Patches are applied byte-for-byte by `git apply`/`patch` inside a Linux
+# container. Any CRLF conversion on a Windows checkout would make every hunk
+# fail to apply, so keep these files out of the text pipeline entirely.
+*.patch -text
