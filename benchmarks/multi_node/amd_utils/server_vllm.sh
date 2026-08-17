@@ -183,6 +183,28 @@ if [[ "${DECODE_ENABLE_DP:-false}" == "true" ]] && ! echo "$DECODE_SERVER_CONFIG
     DECODE_SERVER_CONFIG+=" --enable-dp-attention"
 fi
 
+# Decode context parallelism, decode side only.
+#
+# The point of the arm is that the two legs are NOT symmetric: prefill runs
+# TP-only (dcp=1) and decode shards its KV cache over DECODE_DCP ranks, so the
+# KV a prefill produced does not land where decode's attention kernel reads it
+# and the connector has to relayout on arrival. Adding the flag to prefill as
+# well would make the layouts match and quietly remove what is being tested.
+#
+# --cp-kv-cache-interleave-size goes on BOTH: at dcp=1 it is the identity, so
+# prefill's own layout is unchanged, but the relayout validates the peer against
+# the local value and the two legs have to agree on it.
+if [[ "${DECODE_DCP:-1}" -gt 1 ]]; then
+    if [[ "${DECODE_ENABLE_DP:-false}" == "true" ]]; then
+        echo "ERROR: DECODE_DCP>1 with DP attention is not a validated combination" >&2
+        exit 1
+    fi
+    DECODE_SERVER_CONFIG+=" --decode-context-parallel-size ${DECODE_DCP}"
+    DECODE_SERVER_CONFIG+=" --cp-kv-cache-interleave-size ${CP_KV_INTERLEAVE:-1}"
+    PREFILL_SERVER_CONFIG+=" --cp-kv-cache-interleave-size ${CP_KV_INTERLEAVE:-1}"
+    echo "[INFO] decode context parallel: dcp=${DECODE_DCP} interleave=${CP_KV_INTERLEAVE:-1} (prefill stays TP-only)"
+fi
+
 echo "PREFILL_SERVER_CONFIG (after TP/EP/DP): $PREFILL_SERVER_CONFIG"
 echo "DECODE_SERVER_CONFIG (after TP/EP/DP): $DECODE_SERVER_CONFIG"
 

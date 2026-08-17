@@ -519,6 +519,16 @@ DOCKER_ENV_COMMON=(
     -e DECODE_EP=\${DECODE_EP:-1}
     -e DECODE_DP_ATTN=\${DECODE_DP_ATTN:-false}
     -e DECODE_MTP_SIZE=\$DECODE_MTP_SIZE
+    # Heterogeneous TP-prefill -> DCP-decode. DECODE_DCP shards the decode KV
+    # cache across DECODE_DCP ranks while the prefill stays TP-only, so the KV
+    # connector has to relayout on arrival; CP_KV_INTERLEAVE must be 1 because
+    # the token-granular relayout is only defined for that interleave.
+    # K3_MORIIO_PATCH selects which in-container vLLM patch the K3 arm applies,
+    # so the DCP arm and the plain 1P1D arm can differ by a file rather than by
+    # an edit to the shared apply script.
+    -e DECODE_DCP=\${DECODE_DCP:-1}
+    -e CP_KV_INTERLEAVE=\${CP_KV_INTERLEAVE:-1}
+    -e K3_MORIIO_PATCH=\${K3_MORIIO_PATCH:-}
     -e IS_MULTINODE=\$IS_MULTINODE
     -e DRY_RUN=\${DRY_RUN:-0}
     # SWE-bench agentic eval runs inside this container and needs Modal/HF

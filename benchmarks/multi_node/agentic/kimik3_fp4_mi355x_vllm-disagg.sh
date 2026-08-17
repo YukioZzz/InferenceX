@@ -77,6 +77,17 @@ export MORI_WAITALL_BUILD="${MORI_WAITALL_BUILD:-1}"
 export MORI_WAITALL_COMMIT="${MORI_WAITALL_COMMIT:-f7e6ac6863c53821bc7afb91a578cc6ce38fcad0}"
 export MORIIO_READ_MODE="${MORIIO_READ_MODE:-false}"
 
+# ── Heterogeneous TP-prefill -> DCP-decode ──
+# DECODE_DCP=1 is the plain 1P1D arm and changes nothing. Above 1, decode shards
+# its KV cache over DECODE_DCP ranks while prefill stays TP-only, so the KV
+# connector relayouts on arrival; server_vllm.sh adds the serve flags and
+# apply_k3_moriio_patches.sh switches to the patch that contains that code.
+# Exported here (not just left to the matrix) because sbatch has to carry them
+# to job.slurm, which -e's them into the engine container.
+export DECODE_DCP="${DECODE_DCP:-1}"
+export CP_KV_INTERLEAVE="${CP_KV_INTERLEAVE:-1}"
+export K3_MORIIO_PATCH="${K3_MORIIO_PATCH:-}"
+
 # ── Identity / result naming ──
 export MODEL_PREFIX="${MODEL_PREFIX:-kimik3}"
 export PRECISION="${PRECISION:-fp4}"
