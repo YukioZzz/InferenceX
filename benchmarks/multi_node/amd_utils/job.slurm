@@ -419,10 +419,20 @@ if [[ "$ENGINE" == "vllm-disagg" && "$MODEL_NAME" == "Kimi-K3" &&
     fi
     echo "[mori-image] source HEAD=$(git -C "$MORI_SOURCE_DIR" rev-parse HEAD)"
 
-    srun --nodelist="$SELECTED_NODELIST_SRUN" --nodes="$NUM_NODES" \
+    if ! srun --nodelist="$SELECTED_NODELIST_SRUN" --nodes="$NUM_NODES" \
         --ntasks="$NUM_NODES" --ntasks-per-node=1 \
         bash "$DI_REPO_DIR/benchmarks/multi_node/amd_utils/prepare_mori_waitall_image.sh" \
-        "$DOCKER_IMAGE_NAME" "$MORI_DERIVED_IMAGE" "$MORI_SOURCE_DIR"
+        "$DOCKER_IMAGE_NAME" "$MORI_DERIVED_IMAGE" "$MORI_SOURCE_DIR"; then
+        # Switching the image name after a failed build is how a build error
+        # turns into "Get http://localhost/v2/: dial tcp [::1]:80: connection
+        # refused" one stage later: docker reads localhost/... as a registry.
+        # The build failing is the thing worth reporting, so report it here.
+        echo "FATAL: mori#341 derived-image build failed; not switching to $MORI_DERIVED_IMAGE." >&2
+        echo "       Serving would fall back to pulling that name from a registry that does not exist." >&2
+        echo "       Set MORI_WAITALL_BUILD=0 to serve the base image (valid only for MORIIO_READ_MODE=true," >&2
+        echo "       where there is no write-path batch barrier to need IOEngine.wait_all)." >&2
+        exit 1
+    fi
     DOCKER_IMAGE_NAME="$MORI_DERIVED_IMAGE"
     echo "[mori-image] serving from $DOCKER_IMAGE_NAME"
 fi
